@@ -1,0 +1,37 @@
+# Clippy configuration file
+# More info: https://doc.rust-lang.org/clippy/configuration.html
+
+# Maximum allowed cognitive complexity for a function
+cognitive-complexity-threshold = 25
+
+# Maximum allowed lines for a function
+too-many-lines-threshold = 100
+
+# Maximum allowed arguments for a function
+too-many-arguments-threshold = 7
+
+# Valid identifiers in documentation
+doc-valid-idents = [
+    "HTTP",
+    "HTTPS",
+    "URL",
+    "URI",
+    "UUID",
+    "TCP",
+    "TLS",
+    "JSON",
+    "CLI",
+    "API",
+    "DNS",
+    "Caddyfile",
+    "Nginx",
+    "Caddy",
+    "DOT",
+    "Mermaid",
+    "Graphviz",
+    "IPv4",
+    "IPv6",
+]
+
+# Avoid breaking the public API when fixing clippy warnings
+avoid-breaking-exported-api = true

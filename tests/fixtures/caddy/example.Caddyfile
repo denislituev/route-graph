@@ -1,0 +1,33 @@
+# Example Caddyfile for testing
+{
+    admin off
+    email admin@example.com
+}
+
+:80 {
+    redir https://example.com{uri} permanent
+}
+
+example.com, www.example.com {
+    encode gzip
+
+    handle /api/* {
+        reverse_proxy localhost:8080
+    }
+
+    handle_path /ws/* {
+        reverse_proxy localhost:9090
+    }
+
+    handle /static/* {
+        rewrite * /public{path}
+    }
+
+    handle {
+        reverse_proxy localhost:3000
+    }
+}
+
+app.example.com {
+    reverse_proxy localhost:4000
+}
