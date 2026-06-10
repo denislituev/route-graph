@@ -1,8 +1,8 @@
 # RouteGraph
 
-**RouteGraph** — это библиотека и CLI-инструмент на Rust, который читает конфигурации reverse proxy и строит визуальное представление маршрутизации запросов в виде графа.
+**RouteGraph** is a Rust library and CLI tool that reads reverse proxy configurations and visualizes request routing as directed graphs.
 
-## Пример
+## Example
 
 ```mermaid
 graph TD
@@ -14,13 +14,13 @@ graph TD
     n0 --> n1 --> n2 --> n3 --> n4
 ```
 
-## Установка
+## Installation
 
 ```bash
-cargo install routegraph-cli
+cargo install routegraph
 ```
 
-## Использование (CLI)
+## Usage (CLI)
 
 ```bash
 # Parse Caddyfile and show routing summary
@@ -39,32 +39,20 @@ routegraph render mermaid Caddyfile --title "My Routes"
 cat Caddyfile | routegraph parse -
 ```
 
-## Использование (library)
+## Usage (Library)
 
 ```rust
-use routegraph_core::prelude::*;
-use routegraph_caddy::CaddyParser;
-use routegraph_renderer_mermaid::MermaidRenderer;
+use routegraph::prelude::*;
 
 let parser = CaddyParser::new();
 let graph = parser.parse(&caddy_config)?;
 
 let renderer = MermaidRenderer::new();
-let output = renderer.render(&graph)?;
+let output = renderer.render(&graph);
 println!("{output}");
 ```
 
-## Workspace crates
-
-| Crate | Description |
-|-------|-------------|
-| `routegraph-core` | Модель данных графа, трейты `Parser` / `Renderer` / `FormatDetector` |
-| `routegraph-caddy` | Парсер Caddyfile |
-| `routegraph-renderer-dot` | Graphviz DOT renderer |
-| `routegraph-renderer-mermaid` | Mermaid flowchart renderer |
-| `routegraph-cli` | CLI binary |
-
-## Supported formats
+## Supported Formats
 
 | Format | Status |
 |--------|--------|
@@ -77,9 +65,9 @@ println!("{output}");
 | Kubernetes Ingress | Planned |
 | Kubernetes Gateway API | Planned |
 
-## Архитектура
+## Architecture
 
-См. [ARCHITECTURE.md](ARCHITECTURE.md) — полная документация по дизайну, модели данных, трейтам и roadmap.
+See [ARCHITECTURE.md](ARCHITECTURE.md) for full design documentation, data model, traits, and roadmap.
 
 ## License
 

@@ -227,7 +227,6 @@ fn tokenize(input: &str) -> Result<Vec<Token>, ParseError> {
                 lexer.advance();
             }
             '#' => {
-                // Comment: skip to end of line
                 while let Some(c) = lexer.current_char() {
                     if c == '\n' {
                         break;
@@ -481,7 +480,6 @@ fn parse_tokens(tokens: &[Token]) -> Result<Vec<SiteBlock>, ParseError> {
     let mut stream = TokenStream::new(tokens);
     let mut site_blocks = Vec::new();
 
-    // Skip global options block if present
     stream.skip_newlines();
     if stream.peek().map(|t| &t.kind) == Some(&TokenKind::OpenBrace) {
         stream.pos += 1;
@@ -553,7 +551,6 @@ fn parse_tokens(tokens: &[Token]) -> Result<Vec<SiteBlock>, ParseError> {
 fn build_graph(site_blocks: &[SiteBlock]) -> Result<RouteGraph, ParseError> {
     let mut b = RouteGraphBuilder::new();
 
-    // Single Client root
     b.push_node(NodeKind::Client, "Client");
 
     for block in site_blocks {
