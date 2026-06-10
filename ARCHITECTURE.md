@@ -1,615 +1,407 @@
 # RouteGraph — Architecture Document
 
-## 1. Workspace Structure
+## 1. Project Structure
+
+Single crate with a library + binary:
 
 ```
 route-graph/
-├── Cargo.toml                  # workspace root
-├── LICENSE                     # MIT OR Apache-2.0
-├── LICENSE-MIT
-├── LICENSE-APACHE
+├── Cargo.toml
+├── src/
+│   ├── lib.rs           # Re-exports, prelude
+│   ├── main.rs          # CLI binary
+│   ├── model.rs         # RouteGraph, Node, Edge, NodeId, Metadata
+│   ├── builder.rs       # RouteGraphBuilder (stack-based)
+│   ├── error.rs         # ParseError, SourceLocation
+│   ├── traits.rs        # Parser, Renderer, FormatDetector
+│   ├── parse/
+│   │   ├── mod.rs       # Re-exports CaddyParser
+│   │   └── caddy.rs     # Caddyfile lexer, AST, parser
+│   └── render/
+│       ├── mod.rs       # Re-exports DotRenderer, MermaidRenderer
+│       ├── dot.rs       # Graphviz DOT output
+│       └── mermaid.rs   # Mermaid flowchart output
+├── tests/
+│   └── fixtures/
+│       └── caddy/
+│           └── example.Caddyfile
+├── .cargo/
+│   ├── config.toml      # git-fetch-with-cli
+│   ├── deny.toml        # License/source/advisory checks
+│   └── audit.toml       # cargo-audit config
+├── .github/workflows/
+│   ├── ci.yml           # Push to main: lint, test, build, security, docs
+│   ├── pr-check.yml     # PR: fmt, clippy, test, audit, deny
+│   └── release.yml      # Tag v*.*.*: multi-platform build + crates.io + GitHub Release
+├── clippy.toml
+├── CHANGELOG.md
+├── ARCHITECTURE.md
 ├── README.md
-├── ARCHITECTURE.md             # этот документ
-├── deny.toml                   # cargo-deny config
-│
-├── crates/
-│   ├── route-graph-core/       # модель данных графа, трейты
-│   │   ├── Cargo.toml
-│   │   └── src/
-│   │       ├── lib.rs
-│   │       ├── model.rs        # RouteGraph, Node, Edge, ...
-│   │       ├── traits.rs       # Parser, Renderer
-│   │       └── error.rs        # унифицированные ошибки
-│   │
-│   ├── route-graph-parser-caddy/    # парсер Caddyfile
-│   │   ├── Cargo.toml
-│   │   └── src/
-│   │       └── lib.rs
-│   │
-│   ├── route-graph-parser-nginx/    # парсер Nginx
-│   │   ├── Cargo.toml
-│   │   └── src/
-│   │       └── lib.rs
-│   │
-│   ├── route-graph-parser-tinyproxy/ # парсер Tiny Proxy
-│   │   ├── Cargo.toml
-│   │   └── src/
-│   │       └── lib.rs
-│   │
-│   ├── route-graph-renderer-dot/    # Graphviz DOT
-│   │   ├── Cargo.toml
-│   │   └── src/
-│   │       └── lib.rs
-│   │
-│   ├── route-graph-renderer-mermaid/ # Mermaid
-│   │   ├── Cargo.toml
-│   │   └── src/
-│   │       └── lib.rs
-│   │
-│   ├── route-graph-renderer-json/   # JSON (для интеграции)
-│   │   ├── Cargo.toml
-│   │   └── src/
-│   │       └── lib.rs
-│   │
-│   └── route-graph-cli/             # CLI-бинарь
-│       ├── Cargo.toml
-│       └── src/
-│           └── main.rs
-│
-└── tests/                           # интеграционные тесты
-    └── fixtures/
-        ├── caddy/
-        ├── nginx/
-        └── tinyproxy/
+├── LICENSE-MIT
+└── LICENSE-APACHE
 ```
 
-## 2. Workspace `Cargo.toml`
+## 2. Cargo.toml
 
 ```toml
-[workspace]
-resolver = "2"
-members = [
-    "crates/route-graph-core",
-    "crates/route-graph-parser-caddy",
-    "crates/route-graph-parser-nginx",
-    "crates/route-graph-parser-tinyproxy",
-    "crates/route-graph-renderer-dot",
-    "crates/route-graph-renderer-mermaid",
-    "crates/route-graph-renderer-json",
-    "crates/route-graph-cli",
-]
-
-[workspace.package]
+[package]
+name = "routegraph"
 version = "0.1.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/dzany/route-graph"
 rust-version = "1.75"
 
-[workspace.dependencies]
-route-graph-core = { path = "crates/route-graph-core" }
-route-graph-parser-caddy = { path = "crates/route-graph-parser-caddy" }
-route-graph-parser-nginx = { path = "crates/route-graph-parser-nginx" }
-route-graph-parser-tinyproxy = { path = "crates/route-graph-parser-tinyproxy" }
-route-graph-renderer-dot = { path = "crates/route-graph-renderer-dot" }
-route-graph-renderer-mermaid = { path = "crates/route-graph-renderer-mermaid" }
-route-graph-renderer-json = { path = "crates/route-graph-renderer-json" }
+[[bin]]
+name = "routegraph"
+path = "src/main.rs"
 
-# shared
+[dependencies]
 thiserror = "2"
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+serde = { version = "1", features = ["derive"], optional = true }
 clap = { version = "4", features = ["derive"] }
-compact_str = "0.9"
+anyhow = "1"
+serde_json = "1"
+
+[features]
+default = []
+serde = ["dep:serde"]
 ```
 
-## 3. Crate: `route-graph-core`
+## 3. Data Model (`model.rs`)
 
-Это сердце проекта. Содержит модель данных и трейты, которые имплементируют парсеры и рендереры.
-
-### 3.1 Модель данных (`model.rs`)
+### Request flow through the graph
 
 ```
-┌─────────────┐     ┌─────────────┐     ┌─────────────┐
-│ RouteGraph  │────▶│   Node[]    │     │   Edge[]    │
-│             │     │             │     │             │
-│ nodes       │     │ id: NodeId  │     │ source      │
-│ edges       │     │ kind        │     │ target      │
-│ root_ids    │     │ label       │     │ condition   │
-└─────────────┘     │ metadata    │     └──────┬──────┘
-                    └──────┬──────┘            │
-                           │                   │
-              ┌────────────┼───────────┐       │
-              ▼            ▼           ▼       ▼
-         NodeKind     Metadata   Protocol  EdgeCondition
-         ─────────    ────────   ────────  ─────────────
-         Client       port       Http      Always
-         Listener     protocol   Https     PathGlob
-         Host         tls        Grpc      PathPrefix
-         PathMatch    custom     Tcp       PathExact
-         Middleware                         HeaderMatch
-         Backend      TlsConfig  Udp       Method
-                      ─────────
-                      cert_path
-                      auto
-                      sni
+Client → Listener → Host → PathMatch → [Middleware]* → Backend
 ```
 
-**Ключевые дизайнерские решения:**
-
-| Решение | Обоснование |
-|---------|------------|
-| `NodeId = u32` (newtype) | Индексы вместо `Rc` / `Arc` — нет аллокаций, быстрый lookup, `Copy` |
-| `CompactString` вместо `String` | 24 байта inline (вмещает большинство лейблов), меньше аллокаций |
-| `Vec<Node>` + `Vec<Edge>` | SlotMap-подобная структура, данные локальны в памяти, cache-friendly |
-| `metadata.custom: Vec<(K,V)>` | Маленький vec для произвольных полей вместо `HashMap` — парсеров мало ключей |
-| `EdgeCondition` — enum | Паттерн matching — конечное множество, расширяемо добавлением variant |
-| `Protocol` / `TlsConfig` — отдельные типы | Строгая типизация, невозможно перепутать строку с портом |
-
-### 3.2 Builder API
-
-Граф строится через builder-паттерн, чтобы парсеры не работали с внутренними полями напрямую:
+### Core types
 
 ```rust
-RouteGraph::builder()
-    .add_listener(":443")
-        .with_protocol(Protocol::Https)
-        .with_tls_auto()
-        .add_host("example.com")
-            .add_path_match("/api/*")
-                .add_middleware("strip_prefix")
-                    .with_custom("path", "/api")
-                    .done()
-                .add_middleware("header_rewrite")
-                    .done()
-                .add_backend("http://backend:8080")
-                .done()
-            .done()
-        .done()
-    .build()
+pub struct NodeId(u32);  // Copy, usable as Vec index
+
+#[non_exhaustive]
+pub enum NodeKind {
+    Client, Listener, Host, PathMatch, Middleware, Backend,
+}
+
+pub struct Node {
+    pub id: NodeId,
+    pub kind: NodeKind,
+    pub label: String,
+    pub metadata: Metadata,
+}
+
+pub struct Edge {
+    pub source: NodeId,
+    pub target: NodeId,
+    pub condition: Option<EdgeCondition>,
+}
 ```
 
-Builder возвращает `&mut ChildBuilder<...>` — типизированный курсор по уровню вложенности. Парсер не может добавить backend на уровень listener.
+### RouteGraph
 
-### 3.3 Трейты (`traits.rs`)
+The central data structure. Stores nodes and edges in flat `Vec`s with precomputed adjacency indices for O(1) traversal:
 
-#### trait `Parser`
+```rust
+pub struct RouteGraph {
+    nodes: Vec<Node>,
+    edges: Vec<Edge>,
+    root_id: Option<NodeId>,
+    children_of: Vec<Vec<usize>>,  // adjacency: node → edge indices
+    parents_of: Vec<Vec<usize>>,   // reverse adjacency: node → edge indices
+}
+```
+
+| Operation | Complexity |
+|-----------|-----------|
+| `root()` | O(1) via cached `root_id` |
+| `get_node(id)` | O(1) via Vec index |
+| `children_ids(id)` | O(k) where k = out-degree, no allocation |
+| `edges_from(id)` | O(k) where k = out-degree |
+| `validate()` | O(N + E) |
+
+### Metadata
+
+```rust
+#[non_exhaustive]
+pub struct Metadata {
+    pub port: Option<u16>,
+    pub protocol: Option<Protocol>,
+    pub tls: Option<TlsConfig>,
+    pub custom: Vec<(String, String)>,
+}
+```
+
+### EdgeCondition
+
+```rust
+#[non_exhaustive]
+pub enum EdgeCondition {
+    Always,
+    PathGlob(String),       // /api/*
+    PathPrefix(String),     // /api/
+    PathExact(String),      // /api/users
+    HeaderMatch { name, value },
+    Method(String),         // GET, POST
+}
+```
+
+## 4. Builder (`builder.rs`)
+
+Stack-based builder. `push_node` creates a child of the current context, `pop_node` returns to the parent:
+
+```rust
+let mut b = RouteGraph::builder();
+b.push_node(NodeKind::Client, "Client");
+b.push_node(NodeKind::Listener, ":443");
+b.set_port(443);
+b.push_node(NodeKind::Host, "example.com");
+b.push_node(NodeKind::PathMatch, "/api/*");
+b.set_condition(EdgeCondition::PathGlob("/api/*".into()));
+b.push_node(NodeKind::Backend, "http://backend:8080");
+b.pop_node();
+b.pop_node();
+b.pop_node();
+let graph = b.build();
+```
+
+Key design decisions:
+- `&mut` methods are primary (`push_node`, `pop_node`, `set_port`, etc.)
+- Consuming wrappers (`push`, `pop`, `with_port`) delegate to `&mut` variants
+- `last_edge_idx` tracked for O(1) `set_condition` after `push_node`
+- All mutation goes through `RouteGraph::add_node` / `add_edge` (pub(crate))
+
+## 5. Traits (`traits.rs`)
+
+### Parser
 
 ```rust
 pub trait Parser {
-    /// Имя формата: "caddy", "nginx", "tinyproxy"
     fn format_name(&self) -> &str;
-
-    /// Парсинг из строки конфигурации.
-    /// Принимает &str — нулевая аллокация на входе.
     fn parse(&self, input: &str) -> Result<RouteGraph, ParseError>;
-
-    /// Парсинг из файла (convenience, делегирует в parse).
-    fn parse_file(&self, path: &Path) -> Result<RouteGraph, ParseError>;
+    fn parse_file(&self, path: &Path) -> Result<RouteGraph, ParseError>;  // default impl
 }
 ```
 
-#### trait `FormatDetector`
+### FormatDetector
 
 ```rust
 pub trait FormatDetector {
-    /// Быстрая эвристика — можно ли парсить этот файл данным парсером.
-    /// Используется CLI для auto-detect.
     fn detect(&self, input: &str) -> DetectionConfidence;
 }
 
+#[non_exhaustive]
 pub enum DetectionConfidence {
-    None,
-    Maybe,
-    Likely,
-    Certain,
+    None = 0, Maybe = 1, Likely = 2, Certain = 3,
 }
 ```
 
-#### trait `Renderer`
+### Renderer
 
 ```rust
 pub trait Renderer {
-    /// Имя выходного формата: "dot", "mermaid", "json"
     fn format_name(&self) -> &str;
-
-    /// Рендеринг графа в строку.
-    fn render(&self, graph: &RouteGraph) -> Result<String, RenderError>;
-
-    /// Рендеринг с опциями (позволяет расширять без breaking change).
-    fn render_with_options(
-        &self,
-        graph: &RouteGraph,
-        options: &RenderOptions,
-    ) -> Result<String, RenderError>;
-}
-
-pub struct RenderOptions {
-    pub direction: LayoutDirection,
-    pub include_metadata: bool,
-    pub collapse_middleware: bool,
-    pub color_scheme: ColorScheme,
-    pub title: Option<String>,
-}
-
-pub enum LayoutDirection {
-    TopToBottom,
-    LeftToRight,
-    BottomToTop,
-    RightToLeft,
-}
-
-pub enum ColorScheme {
-    Auto,
-    Dark,
-    Light,
-    Plain,
+    fn render(&self, graph: &RouteGraph) -> String;
 }
 ```
 
-### 3.4 Error handling (`error.rs`)
+Returns `String` (not `Result`) — rendering never fails for a valid graph.
+
+## 6. Error Handling (`error.rs`)
 
 ```rust
-pub struct ParseError {
-    pub kind: ParseErrorKind,
-    pub message: String,
-    pub location: Option<SourceLocation>,
+pub enum ParseError {
+    Syntax { message: String, line: u32 },
+    Semantics { message: String },
+    Io { source: io::Error, path: String },
+    Unsupported(String),
 }
+```
 
-pub enum ParseErrorKind {
-    Syntax,
-    Semantics,
-    Io,
-    UnsupportedFeature,
+- `ParseError::syntax(msg, line)` — convenience constructor
+- `ParseError::io(source, path)` — wraps I/O errors with path context
+- Implements `std::error::Error` with `source()` for the `Io` variant
+
+## 7. Parsers (`parse/`)
+
+### Caddyfile Parser (`parse/caddy.rs`)
+
+Three-phase pipeline:
+
+```
+Input string → Tokenize → AST → RouteGraph
+```
+
+**Tokenizer** — `Lexer` iterates over input by byte position, zero allocation per character:
+- `Token { kind: TokenKind, line: u32 }` — carries source location
+- `TokenKind::Word(String) | OpenBrace | CloseBrace | Newline`
+- Handles `#` comments, quoted strings, embedded `{placeholder}` braces
+
+**AST** — intermediate representation:
+```rust
+struct SiteBlock { addresses: Vec<String>, directives: Vec<Directive> }
+
+enum Directive {
+    ReverseProxy { matcher, upstream },
+    Handle { matcher, directives },
+    HandlePath { path, directives },
+    Rewrite { matcher, to },
+    Redir { matcher, to, code },
+    Other { name, args },
 }
-
-pub struct SourceLocation {
-    pub line: u32,
-    pub column: Option<u32>,
-    pub file: Option<String>,
-}
-
-pub struct RenderError { ... }
 ```
 
-## 4. Crate: Парсеры (на примере `route-graph-parser-caddy`)
+**Graph construction** — walks AST and drives `RouteGraphBuilder`:
+- Single `Client` root node
+- Each site address becomes `Listener` (+ optional `Host`)
+- `reverse_proxy` → `Backend` (with optional `PathMatch`)
+- `handle` / `handle_path` → `PathMatch` with sub-directives
+- `rewrite` / `redir` → `Middleware`
+- Known middleware directives (`encode`, `log`, `header`, etc.) → `Middleware`
+- Global options block `{ ... }` skipped
+- Multi-address sites (`example.com, www.example.com`) split into separate listener trees
+- Port 443 / `https://` → auto-detect HTTPS + TLS
 
-Каждый crate парсера:
+**FormatDetector** — heuristic based on:
+- Known Caddy directives (`reverse_proxy`, `file_server`, `handle_path`, `encode`)
+- Block pattern (` {\n`)
+- Global block start (`{`)
 
-- Зависит **только** от `route-graph-core`
-- Экспортирует одну публичную структуру, реализующую `Parser` + `FormatDetector`
-- Содержит приватные модули для lexer/parser внутренних шагов
-- Имеет `#[cfg(test)]` модуль с тестами на fixtures
+### Adding a new parser
 
-```
-route-graph-parser-caddy/
-├── Cargo.toml
-└── src/
-    ├── lib.rs          # pub struct CaddyParser; impl Parser, impl FormatDetector
-    ├── lexer.rs        # токенизация Caddyfile
-    └── grammar.rs      # AST → RouteGraph
-```
+1. Create `src/parse/<format>.rs`
+2. Implement `Parser` and `FormatDetector` traits
+3. Add `pub mod <format>;` and `pub use` to `src/parse/mod.rs`
+4. Register in CLI (`src/main.rs`) for format detection and parsing
 
-**Зависимости:** `route-graph-core`, `thiserror`, опционально `log`.
+## 8. Renderers (`render/`)
 
-### Добавление нового парсера (checklist):
+### DOT (`render/dot.rs`)
 
-1. Создать `crates/route-graph-parser-<name>/`
-2. Добавить в `workspace.members`
-3. Реализовать `trait Parser` + `trait FormatDetector`
-4. Добавить fixture-тесты
-5. Подключить в CLI (feature flag)
-
-## 5. Crate: Рендереры
-
-Аналогичная структура. Каждый рендерер зависит от `route-graph-core`.
-
-### Рендереры MVP:
-
-| Crate | Выходной формат | Use case |
-|-------|----------------|----------|
-| `route-graph-renderer-dot` | Graphviz DOT | `dot -Tpng`, документация |
-| `route-graph-renderer-mermaid` | Mermaid | Markdown, GitHub README |
-| `route-graph-renderer-json` | JSON | Интеграция, веб-интерфейсы |
-
-## 6. Crate: `route-graph-cli`
-
-### CLI interface
-
-```
-route-graph [OPTIONS] <INPUT>
-
-Arguments:
-  <INPUT>  Path to config file, or "-" for stdin
-
-Options:
-  -f, --format <FORMAT>      Input format [caddy|nginx|tinyproxy|auto]
-                             [default: auto]
-  -r, --renderer <RENDERER>  Output format [dot|mermaid|json]
-                             [default: mermaid]
-  -o, --output <OUTPUT>      Output file [default: stdout]
-      --direction <DIR>      Layout direction [tb|lr|bt|rl] [default: tb]
-      --no-metadata          Hide metadata (ports, TLS, etc.)
-      --collapse-middleware  Show middleware as single node
-      --title <TITLE>        Graph title
-      --list-formats         List available input formats and exit
-      --list-renderers       List available renderers and exit
-  -h, --help                 Print help
-  -V, --version              Print version
-```
-
-### Архитектура CLI
-
-```
-CLI args (clap)
-  │
-  ▼
---format auto? ──Yes──▶ Try FormatDetector for each parser
-  │                          │
-  No                         │
-  │                          │
-  ▼                          ▼
-Select parser by name ◀──────┘
-  │
-  ▼
-parser.parse(input)
-  │
-  ▼
-RouteGraph
-  │
-  ▼
-Selected Renderer
-  │
-  ▼
-renderer.render(graph)
-  │
-  ▼
-Output (stdout / file)
-```
-
-CLI собирает парсеры через feature flags:
-
-```toml
-[features]
-default = ["caddy", "nginx", "tinyproxy", "dot", "mermaid", "json"]
-caddy = ["dep:route-graph-parser-caddy"]
-nginx = ["dep:route-graph-parser-nginx"]
-tinyproxy = ["dep:route-graph-parser-tinyproxy"]
-dot = ["dep:route-graph-renderer-dot"]
-mermaid = ["dep:route-graph-renderer-mermaid"]
-json = ["dep:route-graph-renderer-json"]
-```
-
-`main.rs` содержит registry парсеров/рендереров:
+`DotRenderer` produces Graphviz DOT:
 
 ```rust
-fn build_parser_registry() -> Vec<Box<dyn Parser>> {
-    let mut parsers: Vec<Box<dyn Parser>> = Vec::new();
-    #[cfg(feature = "caddy")]
-    parsers.push(Box::new(CaddyParser::new()));
-    #[cfg(feature = "nginx")]
-    parsers.push(Box::new(NginxParser::new()));
-    #[cfg(feature = "tinyproxy")]
-    parsers.push(Box::new(TinyProxyParser::new()));
-    parsers
-}
+let renderer = DotRenderer::new().with_title("MyRoutes");
+let dot = renderer.render(&graph);
+// digraph MyRoutes { rankdir=TB; ... }
 ```
 
-## 7. Модель данных — детальный разбор
+- Node styling: colors by `NodeKind`, shapes (ellipse/diamond/cylinder/box)
+- Edge labels from `EdgeCondition`
+- Port shown as tooltip
 
-### Поток запроса через модель
+### Mermaid (`render/mermaid.rs`)
 
-```
-Client
-  │
-  ▼
-Listener :443
-  │
-  ▼
-Host example.com
-  │
-  ├──▶ PathMatch /api/*
-  │      │
-  │      ▼
-  │    Middleware strip_prefix
-  │      │
-  │      ▼
-  │    Middleware header_rewrite
-  │      │
-  │      ▼
-  │    Backend http://backend:8080
-  │
-  └──▶ PathMatch /*
-         │
-         ▼
-       Backend http://frontend:3000
-```
-
-Это прямо ложится в структуру: `Client → Listener → Host → PathMatch → [Middleware]* → Backend`.
-
-### Node — минимальный набор полей
-
-| Поле | Тип | Зачем |
-|------|-----|-------|
-| `id` | `NodeId` | Уникальный идентификатор (индекс в слайсе) |
-| `kind` | `NodeKind` | Тип ноды — определяет рендеринг и валидацию |
-| `label` | `CompactString` | Человекочитаемый текст (":443", "example.com") |
-| `metadata` | `Metadata` | Опциональные данные (порт, TLS, протокол) |
-
-### Edge — направленная связь
-
-`Edge` содержит `source` и `target` (оба `NodeId`). Рендерер может добавить лейбл к edge через `condition`.
-
-## 8. Публичные API (summary)
-
-### `route-graph-core`
+`MermaidRenderer` produces Mermaid flowcharts:
 
 ```rust
-// Реэкспорты
-pub use model::*;
-pub use traits::*;
-pub use error::*;
-pub use builder::*;
-
-// model
-pub struct RouteGraph { ... }         // основная структура
-pub struct Node { ... }
-pub struct Edge { ... }
-pub struct NodeId(u32);
-pub enum NodeKind { Client, Listener, Host, PathMatch, Middleware, Backend }
-pub struct Metadata { ... }
-pub enum Protocol { Http, Https, Grpc, Tcp, Udp }
-pub struct TlsConfig { ... }
-pub enum EdgeCondition { ... }
-
-// builder
-pub struct RouteGraphBuilder { ... }
-impl RouteGraph {
-    pub fn builder() -> RouteGraphBuilder;
-}
-
-// traits
-pub trait Parser { ... }
-pub trait Renderer { ... }
-pub trait FormatDetector { ... }
-
-// config
-pub struct RenderOptions { ... }
-pub enum LayoutDirection { ... }
-pub enum ColorScheme { ... }
-pub enum DetectionConfidence { ... }
-
-// errors
-pub struct ParseError { ... }
-pub struct RenderError { ... }
+let renderer = MermaidRenderer::new();
+let mermaid = renderer.render(&graph);
+// %% RouteGraph\ngraph TD\n...
 ```
 
-### `route-graph-parser-caddy` (и аналоги)
+- Node shapes: stadium (Client), diamond (Middleware), cylinder (Backend), rounded (others)
+- CSS class definitions for color coding
+- Edge labels in `|...|` syntax
 
-```rust
-pub struct CaddyParser;
-impl CaddyParser {
-    pub fn new() -> Self;
-}
-impl Parser for CaddyParser { ... }
-impl FormatDetector for CaddyParser { ... }
-```
+### Adding a new renderer
 
-### `route-graph-renderer-dot` (и аналоги)
+1. Create `src/render/<format>.rs`
+2. Implement `Renderer` trait
+3. Add `pub mod <format>;` and `pub use` to `src/render/mod.rs`
+4. Register in CLI `match renderer.as_str()` block
 
-```rust
-pub struct DotRenderer;
-impl DotRenderer {
-    pub fn new() -> Self;
-}
-impl Renderer for DotRenderer { ... }
-```
-
-## 9. Зависимости между crates
+## 9. CLI (`main.rs`)
 
 ```
-                    route-graph-core
-                    (model + traits)
-                    ┌───────┬───────┐
-                    │       │       │
-              ┌─────┘       │       └─────┐
-              ▼             ▼             ▼
-      parser-caddy    parser-nginx   parser-tinyproxy
-              │             │             │
-              └─────┬───────┘─────────────┘
-                    │ (optional dep)
-                    ▼
-              route-graph-cli ──────────────────────
-              │         │         │                 │
-              ▼         ▼         ▼                 ▼
-       renderer-dot  renderer-mermaid  renderer-json
+routegraph parse <FILE> [--format auto|caddy]
+routegraph render <FILE> --renderer dot|mermaid [--format auto|caddy] [--title TITLE]
 ```
 
-Пунктир = optional dependency через feature flag. Парсеры и рендереры не знают друг о друге.
+- `--format auto` (default) runs `FormatDetector` on input
+- Accepts `-` for stdin
+- `parse` prints summary: node/edge counts, breakdown by kind, tree view
+- `render` outputs formatted graph to stdout
+- Uses `anyhow` for error reporting
 
-## 10. План реализации MVP
+## 10. Public API Summary
 
-### Фаза 1: Foundation (неделя 1)
+### Root (`routegraph::*`)
 
-| # | Задача | Crate |
-|---|--------|-------|
-| 1 | Инициализация workspace, `Cargo.toml`, license файлы | root |
-| 2 | Реализация модели данных: `RouteGraph`, `Node`, `Edge`, `Metadata` | core |
-| 3 | Реализация `RouteGraphBuilder` | core |
-| 4 | Определение трейтов `Parser`, `Renderer`, `FormatDetector` | core |
-| 5 | Error types: `ParseError`, `RenderError` | core |
-| 6 | Базовые unit-тесты модели (создание графа, обход) | core |
+| Type | Description |
+|------|-------------|
+| `RouteGraph` | The routing graph data structure |
+| `Node` | A node (id, kind, label, metadata) |
+| `Edge` | A directed edge (source, target, condition) |
+| `NodeId` | `u32` newtype, `Copy` |
+| `NodeKind` | Client, Listener, Host, PathMatch, Middleware, Backend |
+| `Metadata` | port, protocol, tls, custom key-values |
+| `Protocol` | Http, Https, Grpc, Tcp, Udp |
+| `TlsConfig` | auto, cert_path, sni |
+| `EdgeCondition` | Always, PathGlob, PathPrefix, PathExact, HeaderMatch, Method |
+| `RouteGraphBuilder` | Stack-based builder |
+| `ParseError` | Syntax, Semantics, Io, Unsupported |
+| `SourceLocation` | line, column, file |
+| `ValidationError` | message |
+| `Parser` | Trait: parse config string → RouteGraph |
+| `Renderer` | Trait: RouteGraph → String |
+| `FormatDetector` | Trait: detect config format |
+| `DetectionConfidence` | None, Maybe, Likely, Certain |
 
-### Фаза 2: Первый парсер + рендерер (неделя 2)
+### `routegraph::parse::*`
 
-| # | Задача | Crate |
-|---|--------|-------|
-| 7 | `CaddyParser` — лексер + парсер Caddyfile | parser-caddy |
-| 8 | Fixture-тесты на реальных Caddyfile | parser-caddy |
-| 9 | `DotRenderer` — генерация Graphviz DOT | renderer-dot |
-| 10 | `MermaidRenderer` — генерация Mermaid | renderer-mermaid |
-| 11 | Визуальная валидация на примерах | — |
+| Type | Description |
+|------|-------------|
+| `CaddyParser` | Caddyfile parser + format detector |
 
-### Фаза 3: CLI + ещё парсеры (неделя 3)
+### `routegraph::render::*`
 
-| # | Задача | Crate |
-|---|--------|-------|
-| 12 | CLI через `clap`, auto-detect формата | cli |
-| 13 | `NginxParser` | parser-nginx |
-| 14 | `TinyProxyParser` | parser-tinyproxy |
-| 15 | `JsonRenderer` | renderer-json |
-| 16 | Интеграционные тесты `tests/` | root |
+| Type | Description |
+|------|-------------|
+| `DotRenderer` | Graphviz DOT output |
+| `MermaidRenderer` | Mermaid flowchart output |
 
-### Фаза 4: Polish (неделя 4)
+### `routegraph::prelude::*`
 
-| # | Задача |
-|---|--------|
-| 17 | CI (GitHub Actions): test, clippy, fmt, deny |
-| 18 | Документация: rustdoc + README |
-| 19 | Публикация на crates.io |
-| 20 | Примеры в `examples/` |
+All of the above in one import.
 
-## 11. Roadmap развития
+## 11. CI/CD
 
-### v0.2 — Расширение парсеров
+| Workflow | Trigger | Jobs |
+|----------|---------|------|
+| `ci.yml` | Push to main/master | lint (fmt + clippy), test, build release, security (deny + audit), docs |
+| `pr-check.yml` | PR to main/master | fmt, clippy, test, cargo-audit, cargo-deny licenses |
+| `release.yml` | Tag `v*.*.*` | 5 platform builds, `cargo publish` to crates.io, GitHub Release with SHA256 |
 
-- Traefik (TOML/YAML динамическая конфигурация)
-- Envoy (xDS / YAML)
-- HAProxy
+Release process:
+```bash
+git tag v0.1.0
+git push origin main v0.1.0
+```
+
+## 12. Roadmap
+
+### v0.2 — More Parsers
+- Nginx parser
+- Tiny Proxy parser
+- JSON renderer
 
 ### v0.3 — Kubernetes
+- Kubernetes Ingress / Gateway API parsers
+- Multi-file input (directory of manifests)
 
-- Kubernetes Ingress (YAML)
-- Kubernetes Gateway API (YAML)
-- Поддержка multi-file конфигураций (директории с манифестами)
+### v0.4 — Visualization
+- SVG/PNG renderer via Graphviz or resvg
+- `RenderOptions` (layout direction, color scheme, metadata visibility)
 
-### v0.4 — Визуализация
-
-- SVG/PNG рендерер (через Graphviz или resvg)
-- Интерактивный HTML рендерер (D3.js / cytoscape.js)
-- WebAssembly сборка для браузера
-
-### v0.5 — Анализ
-
-- Diff между конфигурациями (два файла → diff графа)
-- Валидация: обнаружение конфликтующих маршрутов
+### v0.5 — Analysis
+- Diff between two configurations
 - Dead route detection (unreachable backends)
-- Мерж нескольких конфигураций в один граф
+- Dead route detection (unreachable backends)
 
-### v0.6 — Интеграции
-
-- Library API стабилизация (1.0-ready)
-- Python bindings (PyO3)
-- GitHub Action для CI-визуализации
-- VS Code extension
-
-## 12. Ключевые архитектурные принципы
-
-1. **Парсеры не зависят друг от друга** — добавление нового парсера не требует изменений в существующих
-2. **Рендереры не зависят от парсеров** — через промежуточную модель `RouteGraph`
-3. **Core не знает о конкретных парсерах/рендерерах** — только трейты
-4. **CLI собирает всё через feature flags** — можно собрать минимальный бинарник
-5. **`&str` на входе, `String` на выходе** — минимальные аллокации в парсерах
-6. **`CompactString` для лейблов** — inline хранение до 24 байт, избегаем heap для коротких строк
-7. **Builder для построения графа** — типобезопасная вложенность, парсер не может создать невалидный граф
-8. **`NodeId = u32`** — вместо указателей, нет borrow checker проблем, cache-friendly
+### v0.6 — Integrations
+- Traefik, Envoy, HAProxy parsers
+- Streaming renderers (`impl Write`)
+- Feature-gated parsers
